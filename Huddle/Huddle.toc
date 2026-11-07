@@ -1,0 +1,11 @@
+## Interface: 16001
+## Title: Huddle
+## Notes: A dense Battle.net friends list: one line per friend, the ones you can invite, your realm, a class; sorted by level or name. /huddle
+## Version: 1.0.0
+## Author: Dominik
+## IconTexture: 7808148
+## AllowLoadGameType: camelot
+## SavedVariables: HuddleDB
+
+Lib.lua
+Huddle.lua
