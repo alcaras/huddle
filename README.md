@@ -1,7 +1,7 @@
 # Huddle
 
 A WoW Forever addon that makes the Battle.net friends list dense: one line per friend instead of a big card, so
-you can see 20 friends at once. You can show only the friends you can invite, or only those on your realm, or one class, and sort by
+you can see 20 friends at once. You can show only the friends you can invite, or one class, and sort by
 level or name.
 
 ## What it shows
@@ -12,7 +12,7 @@ level or name.
 - **The invite button** on the right: a check if they're already in your group, the invite icon if you can invite
   them, greyed if you can't (the tooltip gives the reason, like "not allied"). Its tooltip says what a click will do:
   Invite, Suggest invite (you're in a group but not its leader) or Request to join (they're in a group).
-- **Filters** on the bar, each with a count: **Invitable** (only friends you can invite), **My realm**, **Offline**
+- **Filters** on the bar, each with a count: **Invitable** (only friends you can invite) and **Offline**
   (offline friends too, the most recently online first).
 - **Sorts:** **Level** (60 to 1; click again for 1 to 60) and **Name**.
 - **Class icons:** one per class. An icon is lit when friends of that class are in the list, and its tooltip gives counts
