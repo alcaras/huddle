@@ -8,7 +8,7 @@ level or name.
 
 - **One line per friend:** status, account name (favourites starred), level, and the character in its class colour.
   Friends in another game show what they're playing; offline friends show when they were last on. The zone, the
-  realm and the note are in the tooltip.
+  ruleset (PvE, PvP, RP, RP PvP) and the note are in the tooltip.
 - **The invite button** on the right: a check if they're already in your group, the invite icon if you can invite
   them, greyed if you can't (the tooltip gives the reason, like "not allied"). Its tooltip says what a click will do:
   Invite, Suggest invite (you're in a group but not its leader) or Request to join (they're in a group).
