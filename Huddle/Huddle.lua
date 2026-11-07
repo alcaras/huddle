@@ -253,13 +253,30 @@ local function InviteLabel(e)
 	return (label and label ~= "") and label or "Invite"
 end
 
+-- The friend's ruleset. Forever is realmless: you pick a ruleset (Normal, PvP, Roleplay, Roleplay-PvP), and the realm
+-- names the game hands over are internal ones, "CAMWOWUS1Realm8PvP" / "CAMWOW US1 Realm 3 PvE" (the user, 2026-11-07:
+-- "can you clean up the server names?", "pve, pvp, rp, rp pvp", "we probably don't need to see raw ones"). So only
+-- the ruleset after the realm number is shown; a name that does not end in one shows nothing.
+local RULESETS = { pve = "PvE", normal = "PvE", pvp = "PvP", rp = "RP", rppvp = "RP PvP" }
+local function RealmLabel(game)
+	for _, field in ipairs({ "realmDisplayName", "realmName" }) do
+		local name = L.Value(game[field])
+		local tail = type(name) == "string" and name:match("[Rr]ealm%s*%d+%s*(.-)%s*$")
+		local ruleset = tail and RULESETS[tail:lower():gsub("[%s%-_]", "")]
+		if ruleset then return ruleset end
+	end
+	return nil
+end
+ns.RealmLabel = RealmLabel
+
 local function Tooltip(row, e)
 	local account, game = e.account, e.game
 	GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
 	GameTooltip_AddColoredLine(GameTooltip, e.name, FRIENDS_BNET_NAME_COLOR)
 	if e.tier ~= 5 then
 		if e.char then
-			GameTooltip_AddNormalLine(GameTooltip, game.characterName .. (game.realmName and (" - " .. game.realmName) or ""))
+			local realm = RealmLabel(game)
+			GameTooltip_AddNormalLine(GameTooltip, game.characterName .. (realm and (" - " .. realm) or ""))
 			GameTooltip_AddHighlightLine(GameTooltip, FRIENDS_LEVEL_TEMPLATE:format(game.characterLevel or 0, game.className or UNKNOWN))
 			GameTooltip_AddHighlightLine(GameTooltip, (game.factionName or UNKNOWN) .. ", " .. (game.areaName or UNKNOWN))
 		elseif game.richPresence and game.richPresence ~= "" then
