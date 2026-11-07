@@ -1,5 +1,5 @@
--- Huddle: a dense Battle.net friends list for WoW Forever. One line per friend; the friends you can invite, on your
--- realm, of a class; sorted by level or name.
+-- Huddle: a dense Battle.net friends list for WoW Forever. One line per friend; the friends you can invite, of a
+-- class; sorted by level or name.
 --
 -- Forever uses retail's Social UI. Its friends list (SocialUIFrame.FriendsList) rebuilds itself through
 -- C_BattleNet.SearchFriends, which HasRestrictions: once any addon code runs inside that refresh (a hook, a re-sorted
@@ -51,7 +51,7 @@ local classCount = {}
 for _, class in ipairs(CLASSES) do classCount[class] = { shown = 0, invitable = 0 } end
 local offset, queued, pending = 0, false, false
 local search = ""
-local counts = { offline = 0, invitable = 0, realm = 0 }
+local counts = { offline = 0, invitable = 0 }
 local Render, Rebuild
 
 local function ClassName(class)
@@ -60,14 +60,11 @@ end
 
 -- ---------------------------------------------------------------- the friends
 
--- 1 invitable, your realm and faction; 2 invitable elsewhere; 3 online on Forever, not invitable;
--- 4 online elsewhere (app, another game); 5 offline
-local function Tier(e, game, wow, faction, realm)
+-- 1 invitable; 3 online on Forever, not invitable; 4 online elsewhere (app, another game); 5 offline (2 is free:
+-- it was "invitable, another realm" until My realm went, 2026-11-07: Battle.net's realm ids did not match on Forever)
+local function Tier(e, game, wow)
 	if not game.isOnline then return 5 end
-	if e.restriction == BattleNetFriendPartyInviteRestrictionType.None then
-		if game.factionName == faction and game.realmID == realm then return 1 end
-		return 2
-	end
+	if e.restriction == BattleNetFriendPartyInviteRestrictionType.None then return 1 end
 	if wow then return 3 end
 	return 4
 end
@@ -81,17 +78,16 @@ end
 
 -- (re)reads one friend into e. Rows remember a friend by e.id (the Battle.net account): the index into the friends
 -- list moves whenever someone logs on or off.
-local function Update(e, index, account, faction, realm)
+local function Update(e, index, account)
 	local game = account.gameAccountInfo
 	local wow = FriendsListUtil.IsPlayingSameWoWProject(game)
 	local name = BNet_GetBNetAccountName(account) or account.battleTag or "?"
 	e.id, e.account, e.game, e.name, e.key = account.bnetAccountID, account, game, name, name:lower()
 	e.restriction = game.isOnline and FriendsListUtil.GetBattleNetFriendPartyInviteRestriction(index) or nil
-	e.tier = Tier(e, game, wow, faction, realm)
+	e.tier = Tier(e, game, wow)
 	e.level = wow and game.characterLevel or nil
 	e.class = wow and game.classFilename ~= "" and game.classFilename or nil
 	e.char = wow and game.characterName and FriendsListUtil.GetFormattedCharacterName(account) or nil
-	e.mine = e.tier ~= 5 and wow and game.realmID == realm or false
 	e.inGroup = e.tier <= 3 and game.playerGuid ~= nil
 		and L.Read(C_PartyInfo.IsGUIDInGroup, game.playerGuid) == true or false
 	e.last = L.Value(account.lastOnlineTime) or 0
@@ -147,23 +143,20 @@ local COMPARE = {
 function Rebuild()
 	pending = false
 	wipe(entries)
-	counts.offline, counts.invitable, counts.realm = 0, 0, 0
+	counts.offline, counts.invitable = 0, 0
 	for _, c in pairs(classCount) do c.shown, c.invitable = 0, 0 end
-	local faction, realm = UnitFactionGroup("player"), GetRealmID()
 	local box = view and view.FilterBar and view.FilterBar.SearchBar
 	search = box and box:GetText() or ""
 	local filtering = next(classes) ~= nil
 	for index = 1, BNGetNumFriends() do
 		local account = C_BattleNet.GetFriendAccountInfo(index)
 		if account and account.gameAccountInfo then
-			local e = Update({}, index, account, faction, realm)
+			local e = Update({}, index, account)
 			local invitable = e.tier <= 2
 			if e.tier == 5 then counts.offline = counts.offline + 1 end
 			if invitable then counts.invitable = counts.invitable + 1 end
-			if e.mine then counts.realm = counts.realm + 1 end
 			local show = (e.tier ~= 5 or db.offline)
 				and (invitable or not db.invitable)
-				and (e.mine or not db.myRealm)
 				and Matches(e)
 			local c = e.class and classCount[e.class]
 			if show and c then
@@ -179,10 +172,9 @@ end
 
 -- the rows as they are, each friend read again (status, level, invite): nothing moves
 local function RefreshInPlace()
-	local faction, realm = UnitFactionGroup("player"), GetRealmID()
 	for _, e in ipairs(entries) do
 		local index, account = Fresh(e)
-		if index then Update(e, index, account, faction, realm) end
+		if index then Update(e, index, account) end
 	end
 end
 
@@ -459,7 +451,6 @@ end
 local function RenderBar()
 	local bar = list.bar
 	Label(bar.invitable, "Invitable " .. counts.invitable, db.invitable)
-	Label(bar.realm, "My realm " .. counts.realm, db.myRealm)
 	Label(bar.offline, "Offline " .. counts.offline, db.offline)
 	Label(bar.level, db.sortBy == "level" and (db.levelAsc and "Level 1-60" or "Level 60-1") or "Level", db.sortBy == "level")
 	Label(bar.name, "Name", db.sortBy == "name")
@@ -481,7 +472,6 @@ local function EmptyText()
 	if L.Read(BNConnected) == false then return "Battle.net is not connected." end
 	local why = {}
 	if db.invitable then why[#why + 1] = "Invitable" end
-	if db.myRealm then why[#why + 1] = "My realm" end
 	for _, class in ipairs(CLASSES) do if classes[class] then why[#why + 1] = ClassName(class) end end
 	if search ~= "" then why[#why + 1] = '"' .. search .. '"' end
 	if #why > 0 then return "No friends match: " .. table.concat(why, ", ") end
@@ -546,13 +536,11 @@ local function Build()
 	local function Toggle(key) return function() db[key] = not db[key] Changed() end end
 	-- line 1, left: filters (each shows how many friends it would show); right: sorts
 	bar.invitable = BarButton(Toggle("invitable"), "Only friends you can invite to your group", "Invitable 888")
-	bar.realm = BarButton(Toggle("myRealm"), "Only friends on your realm", "My realm 888")
 	bar.offline = BarButton(Toggle("offline"), "Show offline friends too (the most recently online first)", "Offline 888")
 	bar.level = BarButton(function() SetSort("level") end, "Sort by level; click again to flip", "Level 60-1")
 	bar.name = BarButton(function() SetSort("name") end, "Sort by name", "Name")
 	bar.invitable:SetPoint("TOPLEFT", bar, "TOPLEFT", 0, 0)
-	bar.realm:SetPoint("LEFT", bar.invitable, "RIGHT", 2, 0)
-	bar.offline:SetPoint("LEFT", bar.realm, "RIGHT", 2, 0)
+	bar.offline:SetPoint("LEFT", bar.invitable, "RIGHT", 2, 0)
 	bar.name:SetPoint("TOPRIGHT", bar, "TOPRIGHT", -2, 0)
 	bar.level:SetPoint("RIGHT", bar.name, "LEFT", -2, 0)
 	-- line 2: one slot per class, then All while a class is picked
@@ -621,7 +609,7 @@ for _, event in ipairs({ "BN_FRIEND_INFO_CHANGED", "BN_FRIEND_LIST_SIZE_CHANGED"
 end
 
 local DEFAULTS = {
-	version = 1, enabled = true, sortBy = "level", levelAsc = false, offline = false, invitable = false, myRealm = false,
+	version = 1, enabled = true, sortBy = "level", levelAsc = false, offline = false, invitable = false,
 }
 
 L.OnLoad(function()
