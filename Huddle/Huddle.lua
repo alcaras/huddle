@@ -51,7 +51,7 @@ local classCount = {}
 for _, class in ipairs(CLASSES) do classCount[class] = { shown = 0, invitable = 0 } end
 local offset, queued, pending = 0, false, false
 local search = ""
-local counts = { offline = 0, invitable = 0 }
+local counts = { offline = 0, invitable = 0, favorites = 0 }
 local Render, Rebuild
 
 local function ClassName(class)
@@ -83,6 +83,7 @@ local function Update(e, index, account)
 	local wow = FriendsListUtil.IsPlayingSameWoWProject(game)
 	local name = BNet_GetBNetAccountName(account) or account.battleTag or "?"
 	e.id, e.account, e.game, e.name, e.key = account.bnetAccountID, account, game, name, name:lower()
+	e.favorite = account.isFavorite == true   -- BNetAccountInfo.isFavorite: Blizzard's star
 	e.restriction = game.isOnline and FriendsListUtil.GetBattleNetFriendPartyInviteRestriction(index) or nil
 	e.tier = Tier(e, game, wow)
 	e.level = wow and game.characterLevel or nil
@@ -143,7 +144,7 @@ local COMPARE = {
 function Rebuild()
 	pending = false
 	wipe(entries)
-	counts.offline, counts.invitable = 0, 0
+	counts.offline, counts.invitable, counts.favorites = 0, 0, 0
 	for _, c in pairs(classCount) do c.shown, c.invitable = 0, 0 end
 	local box = view and view.FilterBar and view.FilterBar.SearchBar
 	search = box and box:GetText() or ""
@@ -152,12 +153,17 @@ function Rebuild()
 		local account = C_BattleNet.GetFriendAccountInfo(index)
 		if account and account.gameAccountInfo then
 			local e = Update({}, index, account)
+			-- the bar filters combine (all must pass); each count is how many friends that filter governs with the
+			-- others as they are: Invitable 3 and Offline 5 while Favorites is on are favorites (search and class
+			-- left out, as before)
 			local invitable = e.tier <= 2
-			if e.tier == 5 then counts.offline = counts.offline + 1 end
-			if invitable then counts.invitable = counts.invitable + 1 end
-			local show = (e.tier ~= 5 or db.offline)
-				and (invitable or not db.invitable)
-				and Matches(e)
+			local offlineOk = e.tier ~= 5 or db.offline
+			local inviteOk = invitable or not db.invitable
+			local favOk = e.favorite or not db.favorites
+			if e.tier == 5 and favOk then counts.offline = counts.offline + 1 end
+			if invitable and favOk then counts.invitable = counts.invitable + 1 end
+			if e.favorite and offlineOk and inviteOk then counts.favorites = counts.favorites + 1 end
+			local show = offlineOk and inviteOk and favOk and Matches(e)
 			local c = e.class and classCount[e.class]
 			if show and c then
 				c.shown = c.shown + 1
@@ -469,6 +475,7 @@ local function RenderBar()
 	local bar = list.bar
 	Label(bar.invitable, "Invitable " .. counts.invitable, db.invitable)
 	Label(bar.offline, "Offline " .. counts.offline, db.offline)
+	Label(bar.favorites, "Favorites " .. counts.favorites, db.favorites)
 	Label(bar.level, db.sortBy == "level" and (db.levelAsc and "Level 1-60" or "Level 60-1") or "Level", db.sortBy == "level")
 	Label(bar.name, "Name", db.sortBy == "name")
 	-- class slots: lit when the class has friends in view, dim when not; while filtering, the picked ones lit
@@ -488,11 +495,16 @@ end
 local function EmptyText()
 	if L.Read(BNConnected) == false then return "Battle.net is not connected." end
 	local why = {}
+	-- the offline friends Offline would add, when that is what its count says: not with Invitable (nobody offline can
+	-- be invited), a class or a search (the count leaves those out); with Favorites it counts favorites
+	local hidden = not db.offline and not db.invitable and next(classes) == nil and search == ""
+		and counts.offline > 0 and (" (Offline " .. counts.offline .. ")") or ""
 	if db.invitable then why[#why + 1] = "Invitable" end
+	if db.favorites then why[#why + 1] = "Favorites" end
 	for _, class in ipairs(CLASSES) do if classes[class] then why[#why + 1] = ClassName(class) end end
 	if search ~= "" then why[#why + 1] = '"' .. search .. '"' end
-	if #why > 0 then return "No friends match: " .. table.concat(why, ", ") end
-	if not db.offline and counts.offline > 0 then return "No friends online (Offline " .. counts.offline .. ")" end
+	if #why > 0 then return "No friends match: " .. table.concat(why, ", ") .. hidden end
+	if hidden ~= "" then return "No friends online" .. hidden end
 	return "No friends yet."
 end
 
@@ -554,10 +566,12 @@ local function Build()
 	-- line 1, left: filters (each shows how many friends it would show); right: sorts
 	bar.invitable = BarButton(Toggle("invitable"), "Only friends you can invite to your group", "Invitable 888")
 	bar.offline = BarButton(Toggle("offline"), "Show offline friends too (the most recently online first)", "Offline 888")
+	bar.favorites = BarButton(Toggle("favorites"), "Only your Battle.net favorites (the starred friends)", "Favorites 888")
 	bar.level = BarButton(function() SetSort("level") end, "Sort by level; click again to flip", "Level 60-1")
 	bar.name = BarButton(function() SetSort("name") end, "Sort by name", "Name")
 	bar.invitable:SetPoint("TOPLEFT", bar, "TOPLEFT", 0, 0)
 	bar.offline:SetPoint("LEFT", bar.invitable, "RIGHT", 2, 0)
+	bar.favorites:SetPoint("LEFT", bar.offline, "RIGHT", 2, 0)
 	bar.name:SetPoint("TOPRIGHT", bar, "TOPRIGHT", -2, 0)
 	bar.level:SetPoint("RIGHT", bar.name, "LEFT", -2, 0)
 	-- line 2: one slot per class, then All while a class is picked
@@ -627,6 +641,7 @@ end
 
 local DEFAULTS = {
 	version = 1, enabled = true, sortBy = "level", levelAsc = false, offline = false, invitable = false,
+	favorites = false,
 }
 
 L.OnLoad(function()

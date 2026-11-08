@@ -12,8 +12,9 @@ level or name.
 - **The invite button** on the right: a check if they're already in your group, the invite icon if you can invite
   them, greyed if you can't (the tooltip gives the reason, like "not allied"). Its tooltip says what a click will do:
   Invite, Suggest invite (you're in a group but not its leader) or Request to join (they're in a group).
-- **Filters** on the bar, each with a count: **Invitable** (only friends you can invite) and **Offline**
-  (offline friends too, the most recently online first).
+- **Filters** on the bar, each with a count: **Invitable** (only friends you can invite), **Offline**
+  (offline friends too, the most recently online first) and **Favorites** (only your starred Battle.net friends).
+  They combine: Favorites with Invitable shows the favorites you can invite, and the counts follow.
 - **Sorts:** **Level** (60 to 1; click again for 1 to 60) and **Name**.
 - **Class icons:** one per class. An icon is lit when friends of that class are in the list, and its tooltip gives counts
   ("Priest: 3 friends, 1 invitable"). Click to show only that class; several classes work; right-click or **All**
