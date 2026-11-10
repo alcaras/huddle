@@ -18,15 +18,20 @@ local LAYOUT = {
 	dotX = 3,
 	accountX = 16,       -- account name column
 	accountShare = 0.36, -- share of the row width for the account name
+	zoneAccountShare = 0.27, -- with the Zones column on: the account name's share,
+	zoneCharShare = 0.34,    -- the character's; the zone takes the rest (Stranglethorn Vale fits)
 	levelWidth = 18,     -- level column ("60"), right-aligned
 	gap = 6,
 	invite = 16,         -- invite button at the right
 	classIcon = 16,      -- class filter icons
 	classStep = 3,       -- space between them
+	roleGap = 10,        -- between the class slots and the role slots
+	roleIcon = 12,       -- a row's role icons (Tank, Healer, DPS), packed from the left
 	thumbWidth = 3,      -- scroll position line at the right edge
 	wheelRows = 3,       -- rows per mouse wheel step
 	refreshDelay = 0.5,  -- friend updates come in bursts: at most two rebuilds a second
 	hoverRetry = 0.5,    -- while the mouse is over the list the rows keep their places; look again this often
+	cantInvite = 0.45,   -- level and character of a friend on Forever you can't invite: dimmed, so the invitable stand out
 }
 
 local STATUS = {
@@ -39,6 +44,15 @@ local STATUS = {
 -- Forever's classes, in class order: one fixed slot each
 local CLASSES = { "WARRIOR", "PALADIN", "HUNTER", "ROGUE", "PRIEST", "SHAMAN", "MAGE", "WARLOCK", "DRUID" }
 
+-- Battle.net's role tags (the friend menu's Add Tags > Roles), in the group finder's order; `value` is the
+-- Enum.BattleNetFriendTag a friend's accountInfo.friendTags holds, `on` whether this client has the tag
+local TAGS = Enum and Enum.BattleNetFriendTag or {}
+local ROLES = {
+	{ key = "tank", label = "Tank", value = TAGS.TankRole, atlas = "groupfinder-icon-role-micro-tank" },
+	{ key = "healer", label = "Healer", value = TAGS.HealerRole, atlas = "groupfinder-icon-role-micro-heal" },
+	{ key = "dps", label = "DPS", value = TAGS.DamagerRole, atlas = "groupfinder-icon-role-micro-dps" },
+}
+
 local GOLD, GREY = { 1, 0.82, 0 }, { 0.55, 0.55, 0.55 }
 
 local P = L.Printer("Huddle", "66ccff")
@@ -49,6 +63,10 @@ local rows, entries, classButtons = {}, {}, {}
 local classes = {}  -- the class filter: this session only (one forgotten after a /reload hides nobody)
 local classCount = {}
 for _, class in ipairs(CLASSES) do classCount[class] = { shown = 0, invitable = 0 } end
+local roles, roleButtons = {}, {}  -- the role filter: this session only, like the class filter
+local roleCount = {}
+for _, r in ipairs(ROLES) do roleCount[r.key] = { shown = 0, invitable = 0 } end
+local maxRoles = 0                 -- the most role tags one friend has: the role column's width in icons
 local offset, queued, pending = 0, false, false
 local search = ""
 local counts = { offline = 0, invitable = 0, favorites = 0 }
@@ -60,11 +78,43 @@ end
 
 -- ---------------------------------------------------------------- the friends
 
+-- The friend's ruleset. Forever is realmless: you pick a ruleset (Normal, PvP, Roleplay, Roleplay-PvP), and the realm
+-- names the game hands over are internal ones, "CAMWOWUS1Realm8PvP" / "CAMWOW US1 Realm 3 PvE" (the user, 2026-11-07:
+-- "can you clean up the server names?", "pve, pvp, rp, rp pvp", "we probably don't need to see raw ones"). So only
+-- the ruleset after the realm number is shown; a name that does not end in one shows nothing.
+local RULESETS = { pve = "PvE", normal = "PvE", pvp = "PvP", rp = "RP", rppvp = "RP PvP" }
+local function RealmLabel(game)
+	for _, field in ipairs({ "realmDisplayName", "realmName" }) do
+		local name = L.Value(game[field])
+		local tail = type(name) == "string" and name:match("[Rr]ealm%s*%d+%s*(.-)%s*$")
+		local ruleset = tail and RULESETS[tail:lower():gsub("[%s%-_]", "")]
+		if ruleset then return ruleset end
+	end
+	return nil
+end
+ns.RealmLabel = RealmLabel
+
+-- your own ruleset, from your realm's name ("CAMWOW US1 Realm 3 PvE"): nil when it does not parse
+local function MyRuleset()
+	return RealmLabel({ realmName = L.Read(GetRealmName) })
+end
+
 -- 1 invitable; 3 online on Forever, not invitable; 4 online elsewhere (app, another game); 5 offline (2 is free:
 -- it was "invitable, another realm" until My realm went, 2026-11-07: Battle.net's realm ids did not match on Forever)
+-- Blizzard's invite test (GetBattleNetFriendPartyInviteRestriction) checks game, faction, region and game mode, but
+-- its only realm check is for Classic: on Forever a friend on the PvP ruleset passed for a PvE character (the user,
+-- 2026-11-10: "shows me people on pvp when i am on pve"). So invitable also needs the friend's ruleset to be yours;
+-- only the ruleset is compared (the realm numbers and Battle.net's realm ids did not match, 2026-11-07), and when
+-- either side does not parse, Blizzard's verdict stands.
 local function Tier(e, game, wow)
+	e.otherRuleset = nil
 	if not game.isOnline then return 5 end
-	if e.restriction == BattleNetFriendPartyInviteRestrictionType.None then return 1 end
+	if e.restriction == BattleNetFriendPartyInviteRestrictionType.None then
+		local mine, theirs = MyRuleset(), wow and RealmLabel(game)
+		if not (mine and theirs and theirs ~= mine) then return 1 end
+		e.otherRuleset = theirs
+		return 3
+	end
 	if wow then return 3 end
 	return 4
 end
@@ -84,6 +134,17 @@ local function Update(e, index, account)
 	local name = BNet_GetBNetAccountName(account) or account.battleTag or "?"
 	e.id, e.account, e.game, e.name, e.key = account.bnetAccountID, account, game, name, name:lower()
 	e.favorite = account.isFavorite == true   -- BNetAccountInfo.isFavorite: Blizzard's star
+	-- the role tags set in Blizzard's friend menu (accountInfo.friendTags, Enum.BattleNetFriendTag values)
+	e.roles = {}
+	local tags = L.Value(account.friendTags)
+	if type(tags) == "table" then
+		for _, tag in ipairs(tags) do
+			local t = L.Value(tag)
+			for _, r in ipairs(ROLES) do
+				if r.on and t ~= nil and t == r.value then e.roles[r.key] = true end
+			end
+		end
+	end
 	e.restriction = game.isOnline and FriendsListUtil.GetBattleNetFriendPartyInviteRestriction(index) or nil
 	e.tier = Tier(e, game, wow)
 	e.level = wow and game.characterLevel or nil
@@ -92,8 +153,26 @@ local function Update(e, index, account)
 	e.inGroup = e.tier <= 3 and game.playerGuid ~= nil
 		and L.Read(C_PartyInfo.IsGUIDInGroup, game.playerGuid) == true or false
 	e.last = L.Value(account.lastOnlineTime) or 0
-	e.haystack = { name, account.battleTag or "", game.characterName or "", account.note or "" }
+	-- what the search box looks at, lowercased: names, the note (the user tags friends there: "#tank", "#ranged") and,
+	-- while online, the zone (the user: "let me filter by zone"; "desolace" finds everyone in Desolace)
+	local haystack = {}
+	local fields = { name, account.battleTag, game.characterName, account.note }
+	if e.tier ~= 5 then fields[5] = game.areaName end
+	for i = 1, 5 do   -- not ipairs: a missing field must not hide the ones after it
+		local v = L.Value(fields[i])
+		if type(v) == "string" and v ~= "" then haystack[#haystack + 1] = v:lower() end
+	end
+	e.haystack = haystack
 	return e
+end
+
+-- the search box's words, lowercased; every word must be found (plain text: "#" is no pattern) in one of the fields,
+-- so "#tank desolace" finds the tanks in Desolace
+local words = {}
+local function SetSearch(text)
+	search = text:match("^%s*(.-)%s*$")
+	wipe(words)
+	for w in search:lower():gmatch("%S+") do words[#words + 1] = w end
 end
 
 -- the friend's index and account info now, or nil when they left the list
@@ -106,12 +185,14 @@ local function Fresh(e)
 end
 
 local function Matches(e)
-	if search == "" then return true end
-	local s = search:lower()
-	for _, h in ipairs(e.haystack) do
-		if h:lower():find(s, 1, true) then return true end
+	for _, w in ipairs(words) do
+		local found = false
+		for _, h in ipairs(e.haystack) do
+			if h:find(w, 1, true) then found = true break end
+		end
+		if not found then return false end
 	end
-	return false
+	return true
 end
 
 -- both keep offline friends last (the most recently online first); ties go to the invite order (Tier), then the name
@@ -141,13 +222,33 @@ local COMPARE = {
 	end,
 }
 
+-- which role tags this client has: Battle.net friend tags on (AreFriendTagsEnabled) and the role supported for this
+-- game, as Blizzard's own tag menu checks; a role that went away leaves the filter
+local function UpdateRoles()
+	local enabled = L.Read(C_BattleNet.AreFriendTagsEnabled) == true
+	for _, r in ipairs(ROLES) do
+		r.on = enabled and r.value ~= nil
+			and L.Read(C_BattleNet.IsFriendTagSupportedForCurrentGameType, r.value) == true
+		if not r.on then roles[r.key] = nil end
+	end
+end
+
+local function HasPickedRole(e)
+	for key in pairs(roles) do if e.roles[key] then return true end end
+	return false
+end
+
 function Rebuild()
 	pending = false
 	wipe(entries)
+	UpdateRoles()
 	counts.offline, counts.invitable, counts.favorites = 0, 0, 0
 	for _, c in pairs(classCount) do c.shown, c.invitable = 0, 0 end
+	for _, c in pairs(roleCount) do c.shown, c.invitable = 0, 0 end
+	maxRoles = 0
+	local roleFiltering = next(roles) ~= nil
 	local box = view and view.FilterBar and view.FilterBar.SearchBar
-	search = box and box:GetText() or ""
+	SetSearch(box and L.Value(box:GetText()) or "")
 	local filtering = next(classes) ~= nil
 	for index = 1, BNGetNumFriends() do
 		local account = C_BattleNet.GetFriendAccountInfo(index)
@@ -164,13 +265,25 @@ function Rebuild()
 			if invitable and favOk then counts.invitable = counts.invitable + 1 end
 			if e.favorite and offlineOk and inviteOk then counts.favorites = counts.favorites + 1 end
 			local show = offlineOk and inviteOk and favOk and Matches(e)
+			local nRoles = 0
+			for _ in pairs(e.roles) do nRoles = nRoles + 1 end
+			if nRoles > maxRoles then maxRoles = nRoles end
+			-- class and role combine (a priest tagged Healer); each slot's count takes the other group as it is
+			local classOk = not filtering or (e.class ~= nil and classes[e.class] == true)
+			local roleOk = not roleFiltering or HasPickedRole(e)
 			local c = e.class and classCount[e.class]
-			if show and c then
+			if show and roleOk and c then
 				c.shown = c.shown + 1
 				if invitable then c.invitable = c.invitable + 1 end
 			end
-			if show and filtering and not (e.class and classes[e.class]) then show = false end
-			if show then entries[#entries + 1] = e end
+			if show and classOk then
+				for key in pairs(e.roles) do
+					local rc = roleCount[key]
+					rc.shown = rc.shown + 1
+					if invitable then rc.invitable = rc.invitable + 1 end
+				end
+			end
+			if show and classOk and roleOk then entries[#entries + 1] = e end
 		end
 	end
 	table.sort(entries, COMPARE[db.sortBy] or COMPARE.level)
@@ -244,6 +357,7 @@ end
 
 -- Blizzard's reason a friend can't be invited ("not allied", "different region" ...)
 local function Reason(e)
+	if e.otherRuleset then return ("On %s; you are on %s"):format(e.otherRuleset, MyRuleset() or "?") end
 	local text = e.restriction and FriendsListUtil.GetBattleNetFriendPartyInviteRestrictionText(e.restriction)
 	return (text and text ~= "") and text or "Can't invite"
 end
@@ -258,22 +372,6 @@ local function InviteLabel(e)
 		and FriendsListUtil.GetBattleNetFriendInviteTypeLabel(info.inviteType)
 	return (label and label ~= "") and label or "Invite"
 end
-
--- The friend's ruleset. Forever is realmless: you pick a ruleset (Normal, PvP, Roleplay, Roleplay-PvP), and the realm
--- names the game hands over are internal ones, "CAMWOWUS1Realm8PvP" / "CAMWOW US1 Realm 3 PvE" (the user, 2026-11-07:
--- "can you clean up the server names?", "pve, pvp, rp, rp pvp", "we probably don't need to see raw ones"). So only
--- the ruleset after the realm number is shown; a name that does not end in one shows nothing.
-local RULESETS = { pve = "PvE", normal = "PvE", pvp = "PvP", rp = "RP", rppvp = "RP PvP" }
-local function RealmLabel(game)
-	for _, field in ipairs({ "realmDisplayName", "realmName" }) do
-		local name = L.Value(game[field])
-		local tail = type(name) == "string" and name:match("[Rr]ealm%s*%d+%s*(.-)%s*$")
-		local ruleset = tail and RULESETS[tail:lower():gsub("[%s%-_]", "")]
-		if ruleset then return ruleset end
-	end
-	return nil
-end
-ns.RealmLabel = RealmLabel
 
 local function Tooltip(row, e)
 	local account, game = e.account, e.game
@@ -294,6 +392,9 @@ local function Tooltip(row, e)
 		GameTooltip_AddColoredLine(GameTooltip, FriendsListUtil.GetLastOnlineText(account), GRAY_FONT_COLOR)
 	end
 	if account.note and account.note ~= "" then GameTooltip_AddNormalLine(GameTooltip, account.note) end
+	local tagged = {}
+	for _, r in ipairs(ROLES) do if e.roles[r.key] then tagged[#tagged + 1] = r.label end end
+	if #tagged > 0 then GameTooltip_AddNormalLine(GameTooltip, "Roles: " .. table.concat(tagged, ", ")) end
 	GameTooltip_AddColoredLine(GameTooltip, "Click: whisper   Right-click: menu", GRAY_FONT_COLOR)
 	GameTooltip:Show()
 end
@@ -333,6 +434,17 @@ local function Row(i)
 	row.char = row:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
 	row.char:SetJustifyH("LEFT")
 	row.char:SetWordWrap(false)
+	row.roles = {}
+	for k, r in ipairs(ROLES) do
+		local t = row:CreateTexture(nil, "ARTWORK")
+		t:SetSize(LY.roleIcon, LY.roleIcon)
+		t:SetAtlas(r.atlas)
+		row.roles[k] = t
+	end
+	row.zone = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+	row.zone:SetJustifyH("LEFT")
+	row.zone:SetWordWrap(false)
+	row.zone:SetTextColor(GREY[1], GREY[2], GREY[3])
 	row.invite = CreateFrame("Button", nil, row)
 	row.invite:SetSize(LY.invite, LY.invite)
 	row.invite:SetPoint("RIGHT", -2, 0)
@@ -365,16 +477,50 @@ local function Draw(row, e, width)
 	local star = account.isFavorite and (CreateAtlasMarkup("friends-icon-favorites", 10, 10) .. " ") or ""
 	local nameColor = offline and FRIENDS_GRAY_COLOR or FriendsListUtil.GetFriendNameColorForFriendType(account)
 	row.account:SetText(star .. nameColor:WrapTextInColorCode(e.name))
-	local accountWidth = width * LY.accountShare
+	local zones = db.zones
+	local accountWidth = width * (zones and LY.zoneAccountShare or LY.accountShare)
 	row.account:ClearAllPoints()
 	row.account:SetPoint("LEFT", row, "LEFT", LY.accountX, 0)
 	row.account:SetWidth(accountWidth)
 	row.level:ClearAllPoints()
 	row.level:SetPoint("LEFT", row, "LEFT", LY.accountX + accountWidth + LY.gap, 0)
 	row.level:SetText(e.level and (offline and FRIENDS_GRAY_COLOR or HIGHLIGHT_FONT_COLOR):WrapTextInColorCode(tostring(e.level)) or "")
+	-- the role column (only while some friend has a role tag): a friend's roles packed from the left (Tank, Healer, DPS
+	-- order), the column as wide as the most roles one friend has. Fixed places per role zig-zagged down the list
+	-- (one role each) and took three icons' width for one (the user's screenshot, 2026-11-10)
+	local step = LY.roleIcon + 1
+	local n = 0
+	for k, r in ipairs(ROLES) do
+		local t = row.roles[k]
+		t:ClearAllPoints()
+		if e.roles[r.key] then
+			t:SetPoint("LEFT", row.level, "RIGHT", LY.gap + n * step, 0)
+			n = n + 1
+			t:SetDesaturated(offline)
+			t:Show()
+		else
+			t:Hide()
+		end
+	end
+	local column = maxRoles > 0 and (LY.gap + maxRoles * step - 1) or 0
 	row.char:ClearAllPoints()
-	row.char:SetPoint("LEFT", row.level, "RIGHT", LY.gap, 0)
-	row.char:SetPoint("RIGHT", row.invite, "LEFT", -LY.gap, 0)
+	row.char:SetPoint("LEFT", row.level, "RIGHT", column + LY.gap, 0)
+	-- the Zones column (the bar's toggle): the zone of a friend online on Forever, grey, cut short when long; nothing
+	-- for anyone else (offline, another game: the character column already says what they do)
+	row.zone:ClearAllPoints()
+	if zones then
+		row.char:SetWidth(width * LY.zoneCharShare)
+		row.zone:SetPoint("LEFT", row.char, "RIGHT", LY.gap, 0)
+		row.zone:SetPoint("RIGHT", row.invite, "LEFT", -LY.gap, 0)
+		local zone = not offline and e.char and L.Value(game.areaName)
+		row.zone:SetText(type(zone) == "string" and zone or "")
+		row.zone:Show()
+	else
+		row.char:SetWidth(0)   -- no fixed width: the two anchors size it
+		row.char:SetPoint("RIGHT", row.invite, "LEFT", -LY.gap, 0)
+		row.zone:SetText("")
+		row.zone:Hide()
+	end
 	local text = ""
 	if e.char then
 		local color = (not offline) and e.class and C_ClassColor.GetClassColor(e.class) or FRIENDS_GRAY_COLOR
@@ -385,6 +531,12 @@ local function Draw(row, e, width)
 		text = FRIENDS_GRAY_COLOR:WrapTextInColorCode(FriendsListUtil.GetLastOnlineText(account) or "")
 	end
 	row.char:SetText(text)
+	-- the friends you can invite stand out without the Invitable filter (the user: "flag people online on a char i can
+	-- invite"): one online on Forever you can't invite (another faction, region ...: Invitable's own test) is dimmed;
+	-- one in your group stays as is
+	local dim = e.tier == 3 and not e.inGroup
+	row.level:SetAlpha(dim and LY.cantInvite or 1)
+	row.char:SetAlpha(dim and LY.cantInvite or 1)
 	-- the invite slot: a check (in your group), the invite icon (you can), greyed (you can't, the tooltip says why),
 	-- nothing (offline, not on Forever)
 	local invite = row.invite
@@ -471,6 +623,35 @@ local function ClassButton(class, i)
 	return b
 end
 
+-- a role slot on line 2, after the class slots; placed by RenderBar (only the roles this client has)
+local function RoleButton(r)
+	local LY = LAYOUT
+	local b = CreateFrame("Button", nil, list.bar)
+	b:SetSize(LY.classIcon, LY.classIcon)
+	b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+	b.icon = b:CreateTexture(nil, "ARTWORK")
+	b.icon:SetAllPoints()
+	b.icon:SetAtlas(r.atlas)
+	L.Script(b, "OnClick", function(_, button)
+		if button == "RightButton" then wipe(roles)
+		else roles[r.key] = (not roles[r.key]) or nil end
+		Changed()
+	end, "role")
+	L.Script(b, "OnEnter", function(self)
+		local c = roleCount[r.key]
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip_AddNormalLine(GameTooltip, ("%s: %d %s, %d invitable"):format(r.label, c.shown,
+			c.shown == 1 and "friend" or "friends", c.invitable))
+		GameTooltip_AddColoredLine(GameTooltip, "Tagged in Blizzard's friend menu: Add Tags > Roles", GRAY_FONT_COLOR)
+		GameTooltip_AddColoredLine(GameTooltip, "Click: show only these (more than one role works)", GRAY_FONT_COLOR)
+		GameTooltip_AddColoredLine(GameTooltip, "Right-click: all roles", GRAY_FONT_COLOR)
+		GameTooltip:Show()
+	end, "role")
+	L.Script(b, "OnLeave", function() GameTooltip:Hide() end, "role")
+	roleButtons[r.key] = b
+	return b
+end
+
 local function RenderBar()
 	local bar = list.bar
 	Label(bar.invitable, "Invitable " .. counts.invitable, db.invitable)
@@ -488,8 +669,33 @@ local function RenderBar()
 		b.icon:SetDesaturated(not lit)
 		b:SetAlpha(lit and 1 or (filtering and 0.35 or 0.2))
 	end
-	bar.all:SetShown(filtering)
+	-- role slots after the class slots, the same way; only the roles this client has
+	local LY = LAYOUT
+	local roleFiltering = next(roles) ~= nil
+	local x = 4 + #CLASSES * (LY.classIcon + LY.classStep) - LY.classStep + LY.roleGap
+	local last = classButtons[CLASSES[#CLASSES]]
+	for _, r in ipairs(ROLES) do
+		local b = roleButtons[r.key]
+		b:ClearAllPoints()
+		if r.on then
+			b:SetPoint("LEFT", list.bar, "TOPLEFT", x, -(LY.bar + LY.bar / 2))
+			x = x + LY.classIcon + LY.classStep
+			last = b
+			local lit
+			if roleFiltering then lit = roles[r.key] == true else lit = roleCount[r.key].shown > 0 end
+			b.lit = lit
+			b.icon:SetDesaturated(not lit)
+			b:SetAlpha(lit and 1 or (roleFiltering and 0.35 or 0.2))
+			b:Show()
+		else
+			b:Hide()
+		end
+	end
+	bar.all:ClearAllPoints()
+	bar.all:SetPoint("LEFT", last, "RIGHT", 6, 0)
+	bar.all:SetShown(filtering or roleFiltering)
 	Label(bar.all, "All", false)
+	Label(bar.zones, "Zones", db.zones)
 end
 
 local function EmptyText()
@@ -497,11 +703,13 @@ local function EmptyText()
 	local why = {}
 	-- the offline friends Offline would add, when that is what its count says: not with Invitable (nobody offline can
 	-- be invited), a class or a search (the count leaves those out); with Favorites it counts favorites
-	local hidden = not db.offline and not db.invitable and next(classes) == nil and search == ""
+	local hidden = not db.offline and not db.invitable and next(classes) == nil and next(roles) == nil
+		and search == ""
 		and counts.offline > 0 and (" (Offline " .. counts.offline .. ")") or ""
 	if db.invitable then why[#why + 1] = "Invitable" end
 	if db.favorites then why[#why + 1] = "Favorites" end
 	for _, class in ipairs(CLASSES) do if classes[class] then why[#why + 1] = ClassName(class) end end
+	for _, r in ipairs(ROLES) do if roles[r.key] then why[#why + 1] = r.label end end
 	if search ~= "" then why[#why + 1] = '"' .. search .. '"' end
 	if #why > 0 then return "No friends match: " .. table.concat(why, ", ") .. hidden end
 	if hidden ~= "" then return "No friends online" .. hidden end
@@ -546,6 +754,7 @@ local function Build()
 	local LY = LAYOUT
 	list = CreateFrame("Frame", nil, view)
 	ns.list, ns.rows, ns.entries, ns.classButtons, ns.classes = list, rows, entries, classButtons, classes -- for the harness
+	ns.roleButtons, ns.roles = roleButtons, roles
 	list:SetPoint("TOPLEFT", view.ScrollBox, "TOPLEFT", LY.pad, -LY.pad)
 	list:SetPoint("BOTTOMRIGHT", view.ScrollBar, "BOTTOMRIGHT", 0, LY.pad)
 	list:SetFrameLevel(math.max(view.ScrollBox:GetFrameLevel(), view.ScrollBar:GetFrameLevel()) + 30)
@@ -574,11 +783,16 @@ local function Build()
 	bar.favorites:SetPoint("LEFT", bar.offline, "RIGHT", 2, 0)
 	bar.name:SetPoint("TOPRIGHT", bar, "TOPRIGHT", -2, 0)
 	bar.level:SetPoint("RIGHT", bar.name, "LEFT", -2, 0)
-	-- line 2: one slot per class, then All while a class is picked
+	-- line 2: one slot per class, one per role tag, then All while a class or a role is picked
 	for i, class in ipairs(CLASSES) do ClassButton(class, i) end
-	bar.all = BarButton(function() wipe(classes) Changed() end, "Show all classes again", "All")
+	for _, r in ipairs(ROLES) do RoleButton(r) end
+	bar.all = BarButton(function() wipe(classes) wipe(roles) Changed() end, "Show every class and role again", "All")
 	bar.all:SetPoint("LEFT", classButtons[CLASSES[#CLASSES]], "RIGHT", 6, 0)
 	bar.all:Hide()
+	-- line 2, right: the Zones column on or off (a view, not a filter: no count)
+	bar.zones = BarButton(function() db.zones = not db.zones Render() end, -- the rows stay, the scroll too
+		"Show the zone each friend is in, as a column", "Zones")
+	bar.zones:SetPoint("RIGHT", bar, "TOPRIGHT", -2, -(LY.bar + LY.bar / 2))
 
 	list.thumb = list:CreateTexture(nil, "ARTWORK")
 	list.thumb:SetWidth(LY.thumbWidth)
@@ -635,13 +849,13 @@ local function Setup()
 end
 
 for _, event in ipairs({ "BN_FRIEND_INFO_CHANGED", "BN_FRIEND_LIST_SIZE_CHANGED", "BN_CONNECTED", "BN_DISCONNECTED",
-	"GROUP_ROSTER_UPDATE" }) do
+	"GROUP_ROSTER_UPDATE", "BATTLE_NET_FRIEND_TAG_ENABLED_STATUS_UPDATED" }) do
 	L.On(event, Queue, "friends")
 end
 
 local DEFAULTS = {
 	version = 1, enabled = true, sortBy = "level", levelAsc = false, offline = false, invitable = false,
-	favorites = false,
+	favorites = false, zones = false,
 }
 
 L.OnLoad(function()
